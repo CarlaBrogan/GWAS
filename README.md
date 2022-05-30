@@ -6,4 +6,3 @@ Consequently these symptom domains were subjected to data mining to produce quan
 
 Autism is a highly heritable disorder: twin studies put the heritability estimate as high as 90% (Gupta & State 2007) and SNP-heritability estimates have been observed at >65% (Klei et al. 2012) but GWAS, copy number and sequence-based studies have failed to account for more than ~10% of the heritability (Abrahams & Geschwind 2008).  The possibility that the heritability is being obscured by autism’s considerable heterogeneity provides the incentive to use the derived phenotype scores to assess the proportion of genotypic variance that can be attributed to variance in these phenotypes. 
 
-The results from this GWAS and GCTA analysis suggest that this approach is informative and constructive but is currently limited by sample size and affected by inadequate variation in the phenotype scores produced by this analysis. 
