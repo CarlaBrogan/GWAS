@@ -1,0 +1,1257 @@
+MASTER SCRIPT – to run all subsequent scripts
+global ROOT   	D:\broganc
+
+log using D:\broganc\script_log, text replace
+	do 1_qc
+	do 2_pheno
+	do 3_post_qc
+	do 4_pca
+	do 5_assoc
+	do 6_manhattan
+	do 7_top_hits
+	do 8_gcta
+	do 9_box_plot
+log close
+
+SCRIPT 1: Quality control
+
+*...perform quality control on the agp datasets 
+
+*.... 1.  remove individuals with poor genotyping                [threshold <90%]
+*.... 2.  remove individuals showing high heterozygosity         [threshold >3SD of the means]
+*.... 3.  remove individuals who are identical-by-state          [threshold 0.9=identical; 0.125=cousin; 0.08="unrelated"]
+*.... 4.  remove/correct individuals showing ambiguous gender	 [threshold <0.3=female >0.7=male]
+*.... 5.  remove snps with poor genotyping                       [threshold <95%]
+*.... 6.  remove snps with skewed hardy-weinberg                 [threshold <10e-6; founders-only]
+*.... 7.  remove very low minor allele frequency snps	         [threshold: defined at association level according to power]
+*.... 8.  remove snps known to be poor performers on platform
+
+
+global ROOT   	D:\broganc\1_qc
+global PLINK  	D:\software\plink\plink_1.09a_b20140502.exe
+global TABBED  	D:\software\perl\tabbed.pl
+
+global STAGE1 	D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\autism_genome_project\agp_p2st1_recalled\agp_p2st1_recalled
+global STAGE1A 	D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\autism_genome_project\agp_p2st1_recalled_add\agp_p2st1_recalled_add
+global STAGE2	D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\autism_genome_project\agp_p2st2\agp_p2st2
+global SPC   	D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\autism_genome_project\agp_p2_b36_3_fwd\phen\p2_spc.phen
+global FST   	D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\autism_genome_project\agp_p2_b36_3_fwd\agp_fst.extract
+
+
+cd ${ROOT}
+
+*.... 0.  pre analyses keep probands spc
+insheet using ${SPC},clear
+keep if v3 == 2
+keep v1 v2
+outsheet using affected.txt, non noq replace
+foreach stage in 1 1A 2 {
+	shell(${PLINK} --bfile ${STAGE`stage'}   --out STAGE`stage'_tmp01 --make-founders --make-bed --keep affected.txt)	
+	}
+
+*.... 1.  remove individuals with poor genotyping                [threshold <90%]
+foreach stage in 1 1A 2 {
+	shell(${PLINK} --bfile STAGE`stage'_tmp01 --out STAGE`stage'_tmp02 --mind 0.1 --make-bed)							
+	}
+
+
+
+
+*.... 2.  remove individuals showing high heterozygosity         [threshold >3SD of the means]
+foreach stage in 1 1A 2 {
+	shell(${PLINK} --bfile STAGE`stage'_tmp02 --out STAGE`stage'_tmp03 --het)
+	shell(perl ${TABBED} STAGE`stage'_tmp03.het)
+	insheet using STAGE`stage'_tmp03.het.tabbed,clear
+	gen drop = 0
+	sum f
+	replace drop = 1 if (f > (r(mean) + 3*r(sd)))
+	replace drop = 1 if (f < (r(mean) - 3*r(sd)))
+	keep if drop == 1
+	keep fid iid
+	outsheet using remove.het, non noq replace
+	shell(${PLINK} --bfile STAGE`stage'_tmp02 --out STAGE`stage'_tmp03 --remove remove.het --make-bed)
+	}
+
+	
+*.... 3.  remove individuals who are identical-by-state          [threshold 0.9=identical; 0.125=cousin; 0.08="unrelated"]
+foreach stage in 1 1A 2 {
+	shell(${PLINK} --bfile STAGE`stage'_tmp03  --out STAGE`stage'_tmp03a --make-founders --indep-pairwise 250 5 0.25 )
+	shell(${PLINK} --bfile STAGE`stage'_tmp03  --out STAGE`stage'_tmp03b --extract STAGE`stage'_tmp03a.prune.in --make-bed)
+	shell(${PLINK} --bfile STAGE`stage'_tmp03b --out STAGE`stage'_tmp03c --make-founders --genome)
+	shell(perl ${TABBED} STAGE`stage'_tmp03c.genome)
+	insheet using STAGE`stage'_tmp03c.genome.tabbed,clear
+	gen     drop = 0
+	replace drop = 1 if pi_hat > 0.08
+	keep if drop == 1
+	sum drop
+	keep fid2 iid2
+	contract fid2 iid2
+	drop _freq
+	outsheet using STAGE`stage'_tmp03c.genome.related, non noq replace
+	shell(${PLINK} --bfile STAGE`stage'_tmp03  --out STAGE`stage'_tmp04 --make-founders --remove STAGE`stage'_tmp03c.genome.related --make-bed)
+	}
+
+	
+*.... 4.  remove/correct individuals showing ambiguous gender	 [PLINK threshold <0.2=female >0.8=male but using a less stringent threshold]
+foreach stage in 1 1A 2 {
+	shell(${PLINK} --bfile STAGE`stage'_tmp04  --out STAGE`stage'_tmp04a --make-founders --check-sex)
+	shell(perl ${TABBED} STAGE`stage'_tmp04a.sexcheck)
+	insheet using STAGE`stage'_tmp04a.sexcheck.tabbed,clear
+	gen drop = 0
+	replace drop = 1 if (f>.3 & f<.7)
+	replace drop = 1 if (f<.7 & pedsex == 1)						
+	replace drop = 1 if (f>.3 & pedsex == 2)
+	keep if drop == 1
+	sum drop
+	keep fid iid 
+	outsheet using STAGE`stage'_tmp04a.sexcheck.error, non noq replace
+	shell(${PLINK} --bfile STAGE`stage'_tmp04  --out STAGE`stage'_tmp05 --make-founders --remove STAGE`stage'_tmp04a.sexcheck.error --make-bed)
+	}
+
+	
+foreach stage in 1 1A 2 {
+	*.... 5.  remove snps with poor genotyping                       [threshold <95%]
+	shell(${PLINK} --bfile STAGE`stage'_tmp05  --out STAGE`stage'_tmp06 --make-founders --geno 0.05 --make-bed)
+	*.... 6.  remove snps with skewed hardy-weinberg                 [threshold <10e-6; founders-only]
+	shell(${PLINK} --bfile STAGE`stage'_tmp06  --out STAGE`stage'_tmp07 --make-founders --hwe .000001 --make-bed)							
+	*.... 7.  remove monomorphic snps and remove very low minor allele frequency snps [threshold: 1%]
+	hell(${PLINK} --bfile STAGE`stage'_tmp07  --out STAGE`stage'_tmp08 --make-founders --maf 0.01 --make-bed)							
+	..... 8. remove snps known to be poor performers on platform
+	hell(${PLINK} --bfile STAGE`stage'_tmp08  --out STAGE`stage'_qc_final --exclude ${FST} --make-bed)							
+	
+
+				
+ 
+SCRIPT 2: Produce phenotype file
+
+global ROOT			D:\broganc\2_pheno
+global TABBED     	D:\software\perl\tabbed.pl
+global PHENO		D:\databases\clinical\autism_genome_project\dbaut_agp\out\dbAUT_AGP_raw_adi_merge.dta
+global QCFINAL		D:\broganc\1_qc\
+global IQ		D:\databases\clinical\autism_genome_project\dbaut_agp\out\dbAUT_AGP_raw_iq_merge.dta
+
+
+*...set working folder
+cd ${ROOT}
+
+*...open data file
+use ${PHENO}, clear
+
+*....select important variables (ever)
+keep  AGPFID AGPIID ADI_VERN ADI_AGE ADI_DX ADI_M50E_42E_29E ADI_M51E_43E_30E ADI_M51E_43E_30E ADI_M57E_52E_36E ADI_M62E_66E_43E ADI_M63E_67E_44E ADI_M52E_45E_31E ADI_M53E_46E_32E ADI_M54E_47E_33E ADI_M31E_11E_7E ADI_M55E_49E_34E ADI_M56E_51E_35E ADI_M58E_53E_37E ADI_M59E_57E_38E ADI_M42E_30E_22E ADI_M43E_32E_24E ADI_M44E_33E_25E ADI_M45E_31E_23E ADI_M47E_29E_21E ADI_M48E_63E_40E ADI_M61E_65E_42E ADI_M67E_71E_48E ADI_M70E_75E_50E ADI_M77E_81E_52E ADI_M78E_84E_53E ADI_M69E_72E_49E ADI_M71E_77E_51E   ADI_AGE_ABN_TOT ADI_AGE_ABN ADI_DOMAIN_TOTAL ADI_DX
+
+*....recoding important variables for analyses and generate new variables
+foreach num of num 1/20 {
+	gen SCD_Q`num'E = .
+	}
+foreach num of num 21/26 {
+	gen FIRB_Q`num'E = .
+	}
+
+replace SCD_Q1E = ADI_M50E_42E_29E
+replace SCD_Q2E = ADI_M51E_43E_30E
+replace SCD_Q3E = ADI_M57E_52E_36E 
+replace SCD_Q4E = ADI_M62E_66E_43E
+replace SCD_Q5E = ADI_M63E_67E_44E 
+replace SCD_Q6E = ADI_M52E_45E_31E
+replace SCD_Q7E = ADI_M53E_46E_32E
+replace SCD_Q8E = ADI_M54E_47E_33E
+replace SCD_Q9E = ADI_M31E_11E_7E
+replace SCD_Q10E = ADI_M55E_49E_34E
+replace SCD_Q11E = ADI_M56E_51E_35E
+replace SCD_Q12E = ADI_M58E_53E_37E
+replace SCD_Q13E = ADI_M59E_57E_38E
+replace SCD_Q14E = ADI_M42E_30E_22E
+replace SCD_Q15E = ADI_M43E_32E_24E
+replace SCD_Q16E = ADI_M44E_33E_25E
+replace SCD_Q17E = ADI_M45E_31E_23E
+replace SCD_Q18E = ADI_M47E_29E_21E
+replace SCD_Q19E = ADI_M48E_63E_40E
+replace SCD_Q20E = ADI_M61E_65E_42E
+replace FIRB_Q21E = ADI_M67E_71E_48E
+replace FIRB_Q22E = ADI_M70E_75E_50E
+replace FIRB_Q23E = ADI_M77E_81E_52E 
+replace FIRB_Q24E = ADI_M78E_84E_53E
+replace FIRB_Q25E = ADI_M69E_72E_49E
+replace FIRB_Q26E = ADI_M71E_77E_51E
+label var SCD_Q1E "DIRECT GAZE"
+label var SCD_Q2E "SOCIAL SMILING"
+label var SCD_Q3E "RANGE OF FACIAL EXPRESSIONS USED TO COMMUNICATE"
+label var SCD_Q4E "INTEREST IN CHILDREN"
+label var SCD_Q4E "INTEREST IN CHILDREN"
+label var SCD_Q5E "RESPONSE TO APPROACHES OF OTHER CHILDREN"
+label var SCD_Q6E "SHOWING AND DIRECTING ATTENTION"
+label var SCD_Q7E "OFFERING TO SHARE"
+label var SCD_Q8E "SEEKING TO SHARE ENJOYMENT WITH OTHERS"
+label var SCD_Q9E "USE OF OTHER'S BODY TO COMMUNICATE"
+label var SCD_Q10E "OFFERING COMFORT"
+label var SCD_Q11E "QUALITY OF SOCIAL OVERTURES"
+label var SCD_Q12E "INAPPROPRIATE FACIAL EXPRESSIONS"
+label var SCD_Q13E "APPROPRIATENESS OF SOCIAL RESPONSES"
+label var SCD_Q14E "POINTING TO EXPRESS INTEREST"
+label var SCD_Q15E "NODDING"
+label var SCD_Q16E "HEAD SHAKING"
+label var SCD_Q17E "CONVENTIONAL/INSTRUMENTAL GESTURES"
+label var SCD_Q18E "SPONTANEOUS IMITATION OF ACTIONS"
+label var SCD_Q19E "IMAGINATIVE PLAY"
+label var SCD_Q20E "IMITATIVE SOCIAL PLAY"
+label var FIRB_Q21E "UNUSUAL PREOCCUPATIONS"
+label var FIRB_Q22E "COMPULSIONS/RITUALS"
+label var FIRB_Q23E "HAND AND FINGER MANNERISMS"
+label var FIRB_Q24E "OTHER COMPLEX MANNERISMS OR STEREOTYPED BODY MOVEMENTS"
+label var FIRB_Q25E "REPETITIVE USE OF OBJECTS OR INTEREST IN PARTS OF OBJECTS"
+label var FIRB_Q26E "UNUSUAL SENSORY INTERESTS"
+rename AGPFID FID
+rename AGPIID IID
+save phenotype_data_georgiades.dta,replace
+clear
+
+
+*.....only keep individuals in the genotype files
+foreach stage in 1 1A 2 {
+	insheet using ${QCFINAL}STAGE`stage'_qc_final.fam, clear delim(" ")
+	shell(perl ${TABBED} ${QCFINAL}STAGE`stage'_qc_final.fam)
+	insheet using ${QCFINAL}STAGE`stage'_qc_final.fam.tabbed,clear
+	rename v1 FID
+	rename v2 IID
+	keep FID IID
+	sort FID IID
+	save STAGE`stage'.dta, replace
+	}
+
+append using STAGE1A.dta
+sort FID IID
+append using STAGE1.dta
+sort FID IID
+quietly by FID IID: gen dup = cond(_N==1,0,_n)
+gsort -dup
+drop if dup==2
+drop dup
+tostring FID, replace
+tostring IID, replace
+sort FID IID
+save qc_final_geno_list.dta, replace
+outsheet using qc_final_geno.lst, replace
+
+*.....list of individuals in genotype files but not in phenotype
+use  phenotype_data_georgiades.dta,clear
+sort FID IID
+quietly by FID IID: gen dup = cond(_N==1,0,_n)
+gsort -dup
+drop if dup==2
+drop dup
+sort FID IID
+merge FID IID using qc_final_geno_list.dta
+sort _merge
+tab _merge
+save phenotype_data_tmp02.dta, replace
+keep if _merge==2
+keep FID IID
+sort FID IID
+outsheet using no_phenotype_list.txt, replace non noq
+save no_phenotype_list.dta, replace
+
+*.....list of individuals in both genotype and phenotype files
+use  phenotype_data_tmp02.dta,clear
+keep if _merge==3
+drop _merge
+sort FID IID
+keep  FID IID ADI_VERN ADI_AGE ADI_DOMAIN_TOTAL ADI_DX SCD_Q1E SCD_Q2E SCD_Q3E SCD_Q4E SCD_Q5E SCD_Q6E SCD_Q7E SCD_Q8E SCD_Q9E SCD_Q10E SCD_Q11E SCD_Q12E SCD_Q13E SCD_Q14E SCD_Q15E SCD_Q16E SCD_Q17E SCD_Q18E SCD_Q19E SCD_Q20E FIRB_Q21E FIRB_Q22E FIRB_Q23E FIRB_Q24E FIRB_Q25E FIRB_Q26E
+save phenotype_final.dta, replace
+
+*.............find individuals with missing SCD score but with valid FIRB score and vice versa
+gen a = 0
+for var   SCD_Q1E -  SCD_Q20E: replace a = a+1 if X == 7
+for var   SCD_Q1E -  SCD_Q20E: replace a = a+1 if X == 8
+for var   SCD_Q1E -  SCD_Q20E: replace a = a+1 if X == 9
+gsort -a
+gen b = 0
+for var   FIRB_Q21E -  FIRB_Q26E: replace b = b+1 if X == 7
+for var   FIRB_Q21E -  FIRB_Q26E: replace b = b+1 if X == 8
+for var   FIRB_Q21E -  FIRB_Q26E: replace b = b+1 if X == 9
+gsort -b
+sort FID IID
+
+*......recode 3 = 2, 8 or 9 = 0
+foreach num in 21 22 23 24 25 26 {
+	replace FIRB_Q`num'E = 2 if FIRB_Q`num'E == 3
+	replace FIRB_Q`num'E = 0 if FIRB_Q`num'E == 8
+	replace FIRB_Q`num'E = 0 if FIRB_Q`num'E == 9
+	replace FIRB_Q`num'E = 0 if FIRB_Q`num'E == .
+	}
+foreach num of num 1/20 {
+	replace SCD_Q`num'E = 2 if SCD_Q`num'E == 3
+	replace SCD_Q`num'E = 0 if SCD_Q`num'E == 8
+	replace SCD_Q`num'E = 0 if SCD_Q`num'E == 9
+	replace SCD_Q`num'E = 0 if SCD_Q`num'E == .
+	}
+
+*.........totals
+egen SCD_TOTAL = rowtotal(SCD_Q1E - SCD_Q20E)
+gen FIRB_TOTAL = FIRB_Q21E + FIRB_Q22E + FIRB_Q23E + FIRB_Q24E +FIRB_Q25E + FIRB_Q26E
+
+
+*........replace totals with missing if missingness too high
+replace SCD_TOTAL =. if a>=14
+replace FIRB_TOTAL =. if b>=5
+drop a b
+sort FID IID
+save phenotype_final.dta,replace
+
+
+*.........tag which stage each individual is from
+foreach stage in 1 1A 2 {
+	insheet using ${QCFINAL}STAGE`stage'_qc_final.fam,clear delim(" ")
+	shell(perl ${TABBED} ${QCFINAL}STAGE`stage'_qc_final.fam)
+	insheet using ${QCFINAL}STAGE`stage'_qc_final.fam.tabbed,clear
+	rename v1 FID
+	rename v2 IID
+	keep FID IID
+	tostring FID IID, replace
+	sort FID IID
+	save stage`stage'_list.dta, replace
+	}
+
+use phenotype_final.dta, clear
+sort FID IID
+gen STAGE=""
+merge FID IID using stage1_list.dta
+replace STAGE="S1" if _merge==3
+drop _merge
+sort FID IID
+merge FID IID using stage2_list.dta
+replace STAGE="S2" if _merge==3
+drop _merge
+sort FID IID
+merge FID IID using stage1A_list.dta
+replace STAGE="S1A" if _merge==3
+drop _merge
+sort FID IID
+save phenotype_final.dta,replace
+
+
+*.............histogram
+histogram SCD_TOTAL, discrete frequency fcolor(edkblue) ylabel(, angle(horizontal)) title(Histogram of SCD_TOTAL)
+histogram FIRB_TOTAL, discrete frequency fcolor(edkblue) ylabel(, angle(horizontal)) title(Histogram of FIRB_TOTAL)
+
+
+*.............add IQ as a variable
+use ${IQ}, clear
+rename AGPFID FID
+rename AGPIID IID
+keep  FID IID SCVIQ SCPIQ SCVIQ_CAT SCPIQ_CAT
+label drop IQ IQ_CAT
+label values SCVIQ SCPIQ SCVIQ_CAT SCPIQ_CAT .
+tostring SCVIQ_CAT SCPIQ_CAT, replace
+foreach set in SCVIQ SCPIQ {
+	replace `set'_CAT=">70" if `set'_CAT=="3"
+	replace `set'_CAT="<70" if `set'_CAT=="1"| `set'_CAT=="2"
+	replace `set'=. if `set'==333
+	}
+save IQ.dta, replace
+
+
+SCRIPT 3: Post-QC
+
+global ROOT       		D:\broganc\3_post_qc
+global PLINK	 		D:\software\plink\plink_1.09a_b20140502.exe
+global TABBED     		D:\software\perl\tabbed.pl
+global CAT				D:\software\unix_replicas\cat.exe
+global CUT				D:\software\unix_replicas\cut.exe
+
+global HAPMAP     		D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\hapmap_project\hapmap3_all\hapmap3_all
+global QC_FINAL			D:\broganc\1_qc
+global NO_PHENO			D:\broganc\2_pheno\no_phenotype_list.dta
+global REFERENCE_FOLDER D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\the_1000genomes_project\EUR_1000G_phase1integrated_v3_impute_macGT1\
+global FST       		D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\autism_genome_project\agp_p2_b36_3_fwd\agp_fst.extract
+
+
+cd ${ROOT}
+
+
+*...update base position
+insheet using ${HAPMAP}.bim, clear
+rename v2 snp
+rename v4 bp
+tostring bp,replace
+keep snp bp
+outsheet using update.map, non noq replace
+foreach i in 1 1A 2 {
+	shell(${PLINK}  --bfile ${QC_FINAL}\STAGE`i'_qc_final --update-map update.map --make-bed --out STAGE`i'_hapmap_update)
+	}
+
+
+*............remove individuals with no entry in phenotype files
+use ${NO_PHENO}, clear
+keep FID IID
+sort FID IID
+outsheet using no_phenotype_list.txt,replace non noq
+clear
+foreach i in 1 1A 2 {
+	shell(${PLINK}  --bfile STAGE`i'_hapmap_update --remove no_phenotype_list.txt --make-bed --out STAGE`i'_hapmap_update_pheno)
+	}
+
+
+
+*...limit to overlapping snps
+insheet using STAGE1_hapmap_update_pheno.bim, clear
+keep v2
+rename v2 snp
+sort snp
+save tmp01.dta,replace
+foreach i in 1A 2  {
+	insheet using STAGE`i'_hapmap_update_pheno.bim, clear
+	keep v2
+	rename v2 snp
+	sort snp
+	save tmp0`i'.dta , replace
+	}
+use tmp01.dta, clear
+merge snp using tmp01a.dta
+ta _merge
+keep if _merge == 3
+drop _merge
+keep snp
+sort snp
+merge snp using tmp02.dta
+ta _merge
+keep if _merge == 3
+drop _merge
+sort snp
+outsheet using keep.snp, replace non noq
+
+foreach i in 1 1A 2  {
+	shell(${PLINK} --bfile STAGE`i'_hapmap_update_pheno --extract keep.snp --make-bed --out  STAGE`i'_hapmap_update_pheno_overlap)
+	}
+
+
+*...merge datasets
+shell(${PLINK}  --bfile STAGE1_hapmap_update_pheno_overlap --bmerge STAGE1A_hapmap_update_pheno_overlap.bed STAGE1A_hapmap_update_pheno_overlap.bim STAGE1A_hapmap_update_pheno_overlap.fam --merge-mode 1 --make-bed --out STAGE1_final )
+shell(${PLINK}  --bfile STAGE1_final --bmerge STAGE2_hapmap_update_pheno_overlap.bed STAGE2_hapmap_update_pheno_overlap.bim STAGE2_hapmap_update_pheno_overlap.fam --merge-mode 1 --make-bed --out STAGE1_2_final)
+
+
+*rename STAGE2
+foreach i in bed bim fam {
+	shell  rename "STAGE2_hapmap_update_pheno_overlap.`i'" "STAGE2_final.`i'"
+	}
+
+
+
+ 
+SCRIPT 4: Population stratification
+
+global ROOT       		D:\broganc\4_pca
+global PLINK  			D:\software\plink\plink_1.09a_b20140502.exe
+global TABBED     		D:\software\perl\tabbed.pl
+global CAT				D:\software\unix_replicas\cat.exe
+global CUT				D:\software\unix_replicas\cut.exe
+
+global MERGED			D:\broganc\3_post_qc
+global PRUNED			D:\broganc\1_qc
+global HAPMAP     		D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\hapmap_project\hapmap3_all\hapmap3_all
+global HAPMAP_POP		D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\hapmap_project\hapmap3_all\hapmap3_all.population
+global REFERENCE_FOLDER D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\the_1000genomes_project\EUR_1000G_phase1integrated_v3_impute_macGT1\
+global FST       	 	D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\autism_genome_project\agp_p2_b36_3_fwd\agp_fst.extract
+
+cd ${ROOT}
+
+
+
+*....check that the merged data set (ST1+ST1A+ST2) has no flipped strands
+*shell(${PLINK}  --bfile ${MERGED}\STAGE1_2_final --flip-scan )
+
+
+*...get list of SNPs common to HapMap and merged final datasets (ST1+ST1A+ST2)
+insheet using ${MERGED}\STAGE1_2_final.bim, clear
+keep v2
+rename v2 snp
+sort snp
+save tmp03.dta,replace
+insheet using ${HAPMAP}.bim, clear
+keep v2
+rename v2 snp
+sort snp
+merge snp using tmp03.dta
+ta _merge
+keep if _merge == 3
+drop _merge
+keep snp 
+outsheet using keep2.snp , non noq replace
+shell(${PLINK} --bfile ${MERGED}\STAGE1_2_final --extract keep2.snp --make-bed --out  dataset_hapmap_snps)
+
+
+*..........get list of SNPs common to the LD-pruned datasets
+insheet using ${PRUNED}\STAGE1_tmp03b.bim, clear
+keep v2
+rename v2 snp
+sort snp
+save tmp04.dta,replace
+foreach i in 1A 2 {
+	insheet using ${PRUNED}\STAGE`i'_tmp03b.bim, clear
+	keep v2
+	rename v2 snp
+	sort snp
+	merge snp using tmp04.dta
+	ta _merge
+	keep if _merge == 3
+	drop _merge
+	sort snp
+	save tmp04_`i'.dta, replace
+	}
+use tmp04_1a.dta, clear
+merge snp using tmp04_2.dta
+keep if _merge==3
+drop _merge
+sort snp
+tostring snp, replace
+save tmp05.dta, replace
+outsheet using keep3.snp , non noq replace
+foreach i in 1 1A 2 {
+	shell(${PLINK} --bfile ${PRUNED}\STAGE`i'_tmp03b --extract keep3.snp --make-bed --out  STAGE`i'_pruned_overlap)
+	}
+
+
+*..........get list of SNPs common to pruned and final st1+st1a+st2 merged datasets
+insheet using keep3.snp, clear
+rename v1 snp
+sort snp
+save tmp05.dta,replace
+insheet using ${MERGED}\STAGE1_2_final.bim, clear
+keep v2
+rename v2 snp
+sort snp
+merge snp using tmp05.dta
+ta _merge
+keep if _merge == 3
+drop _merge
+keep snp 
+outsheet using keep4.snp , non noq replace
+
+
+
+*..........get list of SNPs common to pruned, merged and HapMap
+insheet using keep4.snp, clear
+rename v1 snp
+sort snp
+save tmp06.dta,replace
+insheet using ${HAPMAP}.bim, clear
+keep v2
+rename v2 snp
+sort snp
+merge snp using tmp06.dta
+ta _merge
+keep if _merge == 3
+drop _merge
+keep snp 
+outsheet using keep5.snp , non noq replace
+
+shell(${PLINK} --bfile ${MERGED}\STAGE1_2_final --extract keep5.snp --make-bed --out  dataset_hapmap_pruned_snps)
+shell(${PLINK} --bfile ${HAPMAP} --extract keep5.snp --make-bed --out hapmap_short )
+
+
+*..........get list of individuals from the final ST1+ST1A+ST2merged datasets
+insheet using ${MERGED}\STAGE1_2_final.fam, clear delim(" ")
+shell(perl ${TABBED} ${MERGED}\STAGE1_2_final.fam)
+insheet using ${MERGED}\STAGE1_2_final.fam.tabbed,clear 
+rename v1 FID
+rename v2 IID
+keep FID IID
+tostring FID IID, replace
+sort FID IID
+save keep6.list,replace 
+
+
+
+*........merge pruned dataset with HapMap after flipping strand
+shell(${PLINK}  --bfile dataset_hapmap_pruned_snps --bmerge hapmap_short.bed hapmap_short.bim hapmap_short.fam --merge-mode 1 --make-bed --out merged_hapmap_pruned1 )
+shell(${PLINK} --bfile hapmap_short --flip merged_hapmap_pruned-merge.missnp --make-bed --out hapmap_short_flipped )
+shell(${PLINK}  --bfile dataset_hapmap_pruned_snps --bmerge hapmap_short_flipped.bed hapmap_short_flipped.bim hapmap_short_flipped.fam --merge-mode 1 --make-bed --out merged_hapmap_pruned2 )
+
+
+
+
+*.......run genome and produce -mds in plink
+shell(${PLINK} --bfile 	merged_hapmap_pruned2 --genome 	--out genotype_data )
+shell(${PLINK} --bfile  	merged_hapmap_pruned2 --read-genome genotype_data.genome  --cluster --mds-plot 4 --ppc 0.00001 --out genotype_data )
+
+
+
+*..........merge mds data and hapmap population data
+insheet using ${HAPMAP_POP},clear delim(" ")
+shell(perl ${TABBED} ${HAPMAP_POP})
+insheet using ${HAPMAP_POP}.tabbed,clear 
+sort fid iid
+save hapmap_pop.dta, replace
+
+insheet using genotype_data.mds,clear delim(" ")
+shell(perl ${TABBED} genotype_data.mds)
+insheet using genotype_data.mds.tabbed,clear 
+sort fid iid
+
+merge fid iid using hapmap_pop.dta
+ta _merge population
+replace population = "TEST" if _merge ==1
+save genotype.population.dta, replace
+
+
+
+*.........produce graph
+use genotype.population.dta,clear
+gen keep = 0
+replace keep = 1 if pop =="CEU"
+replace keep = 1 if pop =="CHB"
+replace keep = 1 if pop =="YRI"
+replace keep = 1 if pop =="JPT"
+replace keep = 1 if pop =="TEST"
+keep if keep == 1
+
+global CEU      yellow                                                                          
+global CHB      ltblue                                                                          
+global JPT      blue                                                                            
+global YRI      green                                                                           
+global TEST     red                                                                                                                                     
+
+foreach x in 1 2 3 4 {                                                                                                  
+foreach y in 1 2 3 4 {                                                                                                  
+#delimit;                                                                                                               
+twoway scatter c`x' c`y' if  pop=="YRI", msymbol(O) mlwidth(vvthin) mlcolor(black) msize(large) mfcolor(${YRI})         
+|| scatter c`x' c`y' if  pop=="CHB", msymbol(O) mlwidth(vvthin) mlcolor(black) msize(large) mfcolor(${CHB})             
+|| scatter c`x' c`y' if  pop=="JPT", msymbol(O) mlwidth(vvthin) mlcolor(black) msize(large) mfcolor(${JPT})             
+|| scatter c`x' c`y' if  pop=="CEU", msymbol(O) mlwidth(vvthin) mlcolor(black) msize(large) mfcolor(${CEU})
+|| scatter c`x' c`y' if pop=="TEST", msymbol(O) mlwidth(vvthin) mlcolor(black) msize(medium) mfcolor(${TEST})                   
+ysize(10) xsize(10)                                                                                                     
+legend(off)                                                                                                             
+fysize(100)                                                                                                             
+fxsize(100)                                                                                                             
+xlab(none)                                                                                                              
+ylab(none)                                                                                                              
+xtitle("Principal Component `x'")                                                                                                               
+ytitle("Principal Component `y'")                                                                                                               
+;                                                                                                                       
+#delimit cr                                                                                                             
+graph save CEU_`x'_`y'.gph, replace                                     
+}                                                                                                                       
+}                                                                                                                       
+
+clear                                                                                                                   
+set obs 5                                                                                                               
+egen x=seq()                                                                                                            
+gen LABEL=""                                                                                                            
+replace LABEL="YRI" if x==1                                                                                             
+replace LABEL="CHB" if x==2                                                                                             
+replace LABEL="JPT" if x==3                                                                                             
+replace LABEL="CEU" if x==4                                                                                     
+replace LABEL="TEST" if x==5                                                                                                                                         
+egen y=seq(),block(1)                                                                                                   
+egen z=seq(),by(y)                                                                                                      
+#delimit;                                                                                                               
+twoway scatter z y if x==1,  msymbol(O) mlwidth(vvthin) mlcolor(black) msize(huge) mfcolor(${YRI}) mlabel(LABEL) mlabcolor(black)       
+||scatter z y if x==2,  msymbol(O) mlwidth(vvthin) mlcolor(black) msize(huge) mfcolor(${CHB}) mlabel(LABEL) mlabcolor(black)    
+||scatter z y if x==3,  msymbol(O) mlwidth(vvthin) mlcolor(black) msize(huge) mfcolor(${JPT}) mlabel(LABEL) mlabcolor(black)    
+||scatter z y if x==4, msymbol(O) mlwidth(vvthin) mlcolor(black) msize(huge) mfcolor(${CEU}) mlabel(LABEL) mlabcolor(black)     
+||scatter z y if x==5, msymbol(O) mlwidth(vvthin) mlcolor(black) msize(huge) mfcolor(${TEST}) mlabel(LABEL) mlabcolor(black)    
+legend(off)                                                                                                                     
+fysize(100)                                                                                                                     
+fxsize(100)                                                                                                                     
+plotr(c("white"))                                                                                                               
+xscale(r(0 6) off noline)                                                                                                       
+yscale(r(0 2) off noline)                                                                                                       
+xtitle(" ")                                                                                                                     
+ytitle(" ")                                                                                                                     
+title("Key")                                                                                                                    
+;                                                                                                                               
+#delimit cr                                                                                                                     
+graph save key.gph,replace                                                                                                      
+graph combine CEU_1_2.gph CEU_1_3.gph CEU_1_4.gph CEU_2_3.gph CEU_2_4.gph CEU_3_4.gph, col(3) fysize(300) fxsize(100)           
+graph save top.gph,replace                                                                                                      
+graph combine top.gph key.gph,col(1)                                                                                            
+graph export 193s_mds.png, width(3000) replace    
+graph export D:\broganc\results\final_results\193s_mds.png, width(3000) replace  
+
+
+
+ 
+SCRIPT 5: PLINK genome-wide association
+
+global ROOT       	D:\broganc\5_assoc
+global PLINK  		D:\software\plink\plink_1.09a_b20140502.exe
+global TABBED     	D:\software\perl\tabbed.pl
+global HEAD        	D:\software\unix_replicas\head.exe
+global GENDER		D:\databases\clinical\autism_genome_project\dbaut_agp\out\dbAUT_AGP_raw_gender.dta
+global PHENO		D:\broganc\2_pheno\phenotype_final.dta
+global GENO			D:\broganc\4_pca\genotype_data.mds
+global FINAL_DATA1	D:\broganc\3_post_qc\STAGE1_final
+global FINAL_DATA2	D:\broganc\3_post_qc\STAGE2_final
+
+cd ${ROOT}
+
+
+*...............produce pheno file
+use ${PHENO}, clear
+keep  FID IID SCD_TOTAL FIRB_TOTAL
+sort FID IID
+save pheno_list.dta, replace
+outsheet using pheno_list.txt, replace
+use pheno_list.dta, clear
+keep FID IID SCD_TOTAL 
+drop if SCD_TOTAL ==.
+outsheet using SCD_TOTAL.txt, replace noq
+use pheno_list.dta, clear
+keep FID IID FIRB_TOTAL 
+drop if FIRB_TOTAL ==.
+outsheet using FIRB_TOTAL.txt, replace noq
+
+
+
+*.........produce covar file
+use ${PHENO}, clear
+keep FID IID
+save pheno_list2.dta, replace
+clear
+use ${GENDER}, clear
+rename  AGPFID FID
+rename  AGPIID IID
+sort FID IID
+save gender.dta, replace
+clear
+insheet using ${GENO},clear delim(" ")
+shell(perl ${TABBED} ${GENO})
+insheet using ${GENO}.tabbed,clear case
+keep  FID IID C1 C2 C3 C4
+sort FID IID
+merge FID IID using gender.dta
+ta _merge
+keep if _merge==3
+drop _merge
+outsheet using COVAR_gender.txt, replace noq non nol
+
+
+
+*....create covar file without gender in it
+insheet using COVAR_gender.txt, clear
+drop v7
+outsheet using COVAR.txt, replace
+
+
+*..........run association in PLINK
+foreach i in FIRB SCD {
+	shell(${PLINK} --bfile ${FINAL_DATA1} --linear --pheno `i'_TOTAL.txt --covar COVAR.txt --sex --out STAGE1_final_by_`i'_TOTAL )
+	shell(${PLINK} --bfile ${FINAL_DATA1} --assoc qt-means --pheno `i'_TOTAL.txt --covar COVAR.txt --out STAGE1_final_assoc_by_`i'_TOTAL )
+	}
+
+foreach i in FIRB SCD {
+	shell(${PLINK} --bfile ${FINAL_DATA2} --linear --pheno `i'_TOTAL.txt --covar COVAR.txt --sex --out STAGE2_final_by_`i'_TOTAL )
+	shell(${PLINK} --bfile ${FINAL_DATA2} --assoc qt-means --pheno `i'_TOTAL.txt --covar COVAR.txt --out STAGE2_final_assoc_by_`i'_TOTAL )
+	}
+
+shell(${PLINK} --bfile ${FINAL_DATA1} --assoc qt-means --pheno SCD_TOTAL.txt --covar COVAR.txt --out STAGE1_final_assoc_by_SCD_TOTAL )
+shell(${PLINK} --bfile ${FINAL_DATA1} --assoc qt-means --pheno FIRB_TOTAL.txt --covar COVAR.txt --out STAGE1_final_assoc_by_FIRB_TOTAL )
+shell(${PLINK} --bfile ${FINAL_DATA2} --assoc qt-means --pheno SCD_TOTAL.txt --covar COVAR.txt --out STAGE2_final_assoc_by_SCD_TOTAL )
+shell(${PLINK} --bfile ${FINAL_DATA2} --assoc qt-means --pheno FIRB_TOTAL.txt --covar COVAR.txt --out STAGE2_final_assoc_by_FIRB_TOTAL )
+
+
+
+ 
+SCRIPT 6: Manhattan and Q-Q Plots
+
+global ROOT  	      	D:\broganc\6_manhattan	
+global PLINK 			D:\software\plink\plink_1.09a_b20140502.exe
+global TABBED           D:\software\perl\tabbed.pl	
+global ASSOC 			D:\broganc\5_assoc
+	
+		
+
+*...set root directory
+	cd ${ROOT}
+
+*...RUN MANHATTAN AND QQ
+*....define thresholds for manhattan and qq
+	global HIGHLIGHT 5
+	global MAXCHR    23
+	global LIMIT     0
+
+	*set root directory
+	display "...setting root directory as ${ROOT}"
+	cd ${ROOT}
+
+*...draw manhattan
+foreach set in FIRB SCD {
+	shell(${TABBED} ${ASSOC}\STAGE1_final_by_`set'_TOTAL.assoc.linear)
+	insheet using ${ASSOC}\STAGE1_final_by_`set'_TOTAL.assoc.linear.tabbed, clear
+	keep if test == "ADD"
+	destring p, replace force 
+	drop if p ==.
+	save STAGE1_final_by_`set'_TOTAL.assoc.linear.dta, replace
+	use chr bp p using  STAGE1_final_by_`set'_TOTAL.assoc.linear.dta, clear
+	manhattan chr bp p , limit(${LIMIT}) highlight(${HIGHLIGHT}) maxchr(${MAXCHR})
+	graph save GWAS_MANHATTAN_`set'.gph, replace
+	qq_plot p , limit(${LIMIT}) 
+	graph save GWAS_QQ_`set'.gph, replace
+	graph combine GWAS_QQ_`set'.gph GWAS_MANHATTAN_`set'.gph, ycommon
+	graph export  GWAS_QQ_MANHATTAN_`set'.png, replace width(3500) height(1000) as(png)
+	}
+
+*...GENERATE TO CLUMPED TABLE
+*....define thresholds
+	global MAXCHR    23
+	global P_TOP     1e-3
+	global P_LD      0.05
+	global CLUMP_P1  ${P_TOP}
+	global CLUMP_P2  ${P_LD}
+	global CLUMP_KB  1000
+	global CLUMP_R2  0.2
+
+*....define software location
+	global GUNZIP  D:\software\unix_replicas\gunzip.exe
+	global GZIP    D:\software\unix_replicas\gzip.exe
+	global AWK     D:\software\unix_replicas\awk.exe
+	global CAT     D:\software\unix_replicas\cat.exe
+	global CUT     D:\software\unix_replicas\cut.exe
+
+*...perform clump protocol
+	foreach set in FIRB SCD {	
+		foreach chr of num 1/23 {
+			global CHR `chr'
+			use chr snp p using STAGE1_final_by_`set'_TOTAL.assoc.linear.dta, clear
+			replace chr=23 if chr==25
+			keep if chr == ${CHR}
+			drop chr
+			renvars, upper
+			outsheet using GWAS_`set'_chr${CHR}.top, noq replace
+			
+			global REFERENCE 	D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\hapmap_project\hapmap3_ceu\by_chr\hapmap3_ceu_chr${CHR}
+			global CLUMP_ASS  	GWAS_`set'_chr${CHR}.top
+			global GLIST_HG18 	D:\databases\bioinformatics\ftp_ucsc_genome\goldenpath\hg18\database\glist-hg18.txt
+			
+			shell(${PLINK} --bfile ${REFERENCE} --clump ${CLUMP_ASS} --clump-allow-overlap --clump-range ${GLIST_HG18} --clump-p1 ${CLUMP_P1} --clump-p2 ${CLUMP_P2} --clump-kb ${CLUMP_KB} --clump-r2 ${CLUMP_R2} --out ${CLUMP_ASS})
+			shell(${TABBED} ${CLUMP_ASS}.clumped)
+			shell(${TABBED} ${CLUMP_ASS}.clumped.ranges)
+			shell(del ${CLUMP_ASS}.top)
+			shell(del ${CLUMP_ASS}.top.log)
+			shell(del ${CLUMP_ASS}.top.clumped)
+			shell(del ${CLUMP_ASS}.top.clumped.ranges)
+			insheet using ${CLUMP_ASS}.clumped.tabbed,clear non
+			rename v1 chr
+			drop if chr == "CHR"
+			drop if chr == ""
+			rename v3 snp
+			rename v4 bp
+			rename v5 p
+			drop if chr == "CHR"
+			drop if chr == ""
+			destring chr, replace
+			destring bp, replace
+			destring p, replace
+			keep chr snp bp p
+			sort snp
+			save ${CLUMP_ASS}.clumped.dta,replace
+			insheet using ${CLUMP_ASS}.clumped.ranges.tabbed,clear non
+			rename v1 chr
+			drop if chr == "CHR"
+			drop if chr == ""
+			rename v2 snp
+			rename v5 pos
+			rename v6 kb
+			rename v7 ranges
+			keep snp pos kb ranges
+			sort snp
+			merge snp using ${CLUMP_ASS}.clumped.dta
+			drop _merge
+			egen x = seq(),by(snp)
+			keep if x == 1
+			drop x
+			sort snp
+			save      ${CLUMP_ASS}.clumped.ranges.dta,replace
+			use chr snp a1 beta stat using STAGE1_final_by_`set'_TOTAL.assoc.linear.dta, clear
+			keep if chr == ${CHR}
+			sort snp
+			merge snp using ${CLUMP_ASS}.clumped.ranges.dta
+			keep if _merge == 3
+			renvars, upper
+			tostring BP,replace
+			egen POSITION=concat(CHR BP), p(":")
+			gen GENES = RANGES
+			replace GENES = subinstr(GENES , "[", "",.) 
+			replace GENES = subinstr(GENES , "]", "",.) 
+			replace GENES = subinstr(GENES , ",", " ",.) 
+			rename POS LD_RANGE
+			keep  SNP POSITION A1 BETA STAT P LD_RANGE GENES 
+			order SNP POSITION A1 BETA STAT P LD_RANGE GENES  
+			sort P
+			save 	${CLUMP_ASS}.clumped.summary.dta, replace
+			}
+		use   GWAS_`set'_chr1.top.clumped.summary.dta, clear
+		foreach i of num 2/23 {
+			append using GWAS_`set'_chr`i'.top.clumped.summary.dta
+			}
+		sort P
+		egen x = seq()
+		drop if x >10
+		drop x
+		compress
+		save           GWAS_`set'.clumped.summary.dta, replace
+		outsheet using GWAS_`set'.clumped.summary.csv, comma replace noq
+		}
+
+*...DRAW LOCUS PLOT	
+	global CHR       		6
+	global STARTKB   		11870
+	global STOPKB    		11918
+	global INDEX    		rs2076184
+	global PLINK 			D:\software\plink\plink_1.09a_b20140502.exe
+	global TABBED    		D:\software\perl\tabbed.pl
+	global REFLD      		D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\hapmap_project\hapmap3_ceu\by_chr\hapmap3_ceu_chr${CHR}
+	global REFRECOMB  		D:\databases\genomics\single_nucleotide_polymorphism\datasets\impute_format\phased_reference\the_hapmap_project\hapmap3_r2_b36\genetic_map_chr${CHR}_combined_b36.txt
+	global GENE_PANEL 		full
+	global REFGENE    		D:\databases\bioinformatics\ftp_ucsc_genome\goldenpath\hg18\database\derived_refgene_exon.dta
+	use  chr bp p snp using  STAGE1_final_by_FIRB_TOTAL.assoc.linear.dta, clear
+	locus_plot_window chr bp p snp , chr(${CHR}) startkb(${STARTKB}) stopkb(${STOPKB}) index(${INDEX}) plink(${PLINK}) tabbed(${TABBED}) refld(${REFLD}) refrecomb(${REFRECOMB})  title("Locus Plot for ${INDEX}") gene_panel(${GENE_PANEL}) refgene(${REFGENE})
+	graph export "STAGE1_final_by_FIRB_TOTAL_${INDEX}.png", height(2500) width(3000) as(png) replace
+
+
+	global CHR       		3
+	global STARTKB   		174800
+	global STOPKB    		175000
+	global INDEX    		rs9290477
+	global PLINK 		D:\software\plink\plink_1.09a_b20140502.exe
+	global TABBED    		D:\software\perl\tabbed.pl
+	global REFLD      	D:\databases\genomics\single_nucleotide_polymorphism\datasets\plink_format\hapmap_project\hapmap3_ceu\by_chr\hapmap3_ceu_chr${CHR}
+	global REFRECOMB  	D:\databases\genomics\single_nucleotide_polymorphism\datasets\impute_format\phased_reference\the_hapmap_project\hapmap3_r2_b36\genetic_map_chr${CHR}_combined_b36.txt
+	global GENE_PANEL 	full
+	global REFGENE    	D:\databases\bioinformatics\ftp_ucsc_genome\goldenpath\hg18\database\derived_refgene_exon.dta
+	use  chr bp p snp using  STAGE1_final_by_FIRB_TOTAL.assoc.linear.dta, clear
+	locus_plot_window chr bp p snp , chr(${CHR}) startkb(${STARTKB}) stopkb(${STOPKB}) index(${INDEX}) plink(${PLINK}) tabbed(${TABBED}) refld(${REFLD}) refrecomb(${REFRECOMB})  title("Locus Plot for ${INDEX}") gene_panel(${GENE_PANEL}) refgene(${REFGENE})
+	graph export "STAGE1_final_by_FIRB_TOTAL_${INDEX}.png", height(2500) width(3000) as(png) replace
+
+	
+	
+
+ 
+SCRIPT 7: Table of top hits
+
+global ROOT			D:\broganc\7_top_hits
+global TABBED     	D:\software\perl\tabbed.pl
+global PHENO		D:\broganc\2_pheno\phenotype_final.dta
+global ASSOC		D:\broganc\5_assoc
+global TOP10		D:\broganc\6_manhattan
+global DATASET		D:\broganc\3_post_qc\STAGE1_final
+global PLINK	  	D:\software\plink\plink_1.09a_b20140502.exe
+
+
+cd ${ROOT}	
+
+
+*............create set of tabbed files
+foreach stage in 1 2 				{
+	foreach set in FIRB SCD 		{
+		insheet using ${ASSOC}\STAGE`stage'_final_assoc_by_`set'_TOTAL.qassoc.means,clear delim(" ")
+		shell(perl ${TABBED} ${ASSOC}\STAGE`stage'_final_assoc_by_`set'_TOTAL.qassoc.means)
+		insheet using ${ASSOC}\\STAGE`stage'_final_assoc_by_`set'_TOTAL.qassoc.means.tabbed,clear
+		outsheet using STAGE`stage'_`set'_qassoc.means.tabbed, replace
+		shell(perl ${TABBED} ${ASSOC}\STAGE`stage'_final_by_`set'_TOTAL.assoc.linear)
+		insheet using ${ASSOC}\\STAGE`stage'_final_by_`set'_TOTAL.assoc.linear.tabbed,clear
+		outsheet using STAGE`stage'_`set'_assoc.linear.tabbed, replace
+		}
+	}
+
+
+*.........top 10 table of means and SDs
+foreach stage in 1 2 {
+	foreach set in SCD FIRB {
+		insheet using STAGE`stage'_`set'_qassoc.means.tabbed,clear 
+		keep if snp=="rs6965827" | snp=="rs9290477" | snp=="rs2076184" | snp=="rs2267339" | snp=="rs17457313" | snp=="rs9411215" | snp=="rs6634194" | snp=="rs13076191" | snp=="rs1476042" | snp=="rs10510215" | snp=="rs7790324" | snp=="rs6817368" | snp=="rs6948732" | snp=="rs3213460" | snp=="rs4024193" | snp=="rs16860553" | snp=="rs6922714" | snp=="rs10036311" | snp=="rs7354385" | snp=="rs1107785" 
+		gen ranking=""
+		replace ranking = "S1_FIRB_01" if snp =="rs6965827"
+		replace ranking = "S1_FIRB_02" if snp =="rs9290477"
+		replace ranking = "S1_FIRB_03" if snp =="rs2076184"
+		replace ranking = "S1_FIRB_04" if snp =="rs2267339"
+		replace ranking = "S1_FIRB_05" if snp =="rs17457313"
+		replace ranking = "S1_FIRB_06" if snp =="rs9411215"
+		replace ranking = "S1_FIRB_07" if snp =="rs6634194"
+		replace ranking = "S1_FIRB_08" if snp =="rs13076191"
+		replace ranking = "S1_FIRB_09" if snp =="rs1476042"
+		replace ranking = "S1_FIRB_10" if snp =="rs10510215"
+		replace ranking = "S1_SCD_01" if snp =="rs7790324"
+		replace ranking = "S1_SCD_02" if snp =="rs6817368"
+		replace ranking = "S1_SCD_03" if snp =="rs6948732"
+		replace ranking = "S1_SCD_04" if snp =="rs3213460"
+		replace ranking = "S1_SCD_05" if snp =="rs4024193"
+		replace ranking = "S1_SCD_06" if snp =="rs16860553"
+		replace ranking = "S1_SCD_07" if snp =="rs6922714"
+		replace ranking = "S1_SCD_08" if snp =="rs10036311"
+		replace ranking = "S1_SCD_09" if snp =="rs7354385"
+		replace ranking = "S1_SCD_10" if snp =="rs1107785"
+		gen from_domain = "`set'"
+		gen from_stage = "`stage'"
+		save STAGE`stage'_`set'_top.dta, replace
+		outsheet using STAGE`stage'_`set'_top.txt, replace non noq
+		}
+	}
+	
+use STAGE1_FIRB_top.dta
+append using STAGE1_SCD_top.dta
+append using STAGE2_FIRB_top.dta
+append using STAGE2_SCD_top.dta
+save top_all.dta, replace
+outsheet using top_all.txt, replace
+outsheet using top_all.csv, replace
+
+
+*..........produce table of top 10 hits with beta stat and p values for FIRB results
+foreach stage in 1 2 {
+	insheet using STAGE`stage'_FIRB_assoc.linear.tabbed,clear 
+	keep if test =="ADD"
+	keep chr snp bp a1 beta stat p
+	gen ranking=""
+	replace ranking = "S1_FIRB_01" if snp =="rs6965827"
+	replace ranking = "S1_FIRB_02" if snp =="rs9290477"
+	replace ranking = "S1_FIRB_03" if snp =="rs2076184"
+	replace ranking = "S1_FIRB_04" if snp =="rs2267339"
+	replace ranking = "S1_FIRB_05" if snp =="rs17457313"
+	replace ranking = "S1_FIRB_06" if snp =="rs9411215"
+	replace ranking = "S1_FIRB_07" if snp =="rs6634194"
+	replace ranking = "S1_FIRB_08" if snp =="rs13076191"
+	replace ranking = "S1_FIRB_09" if snp =="rs1476042"
+	replace ranking = "S1_FIRB_10" if snp =="rs10510215"
+	drop if ranking ==""
+	rename beta STAGE`stage'_beta
+	rename stat STAGE`stage'_stat
+	rename p STAGE`stage'_p
+	save STAGE`stage'_FIRB_assoc.linear.top.dta, replace
+	}
+	
+use STAGE2_FIRB_assoc.linear.top.dta, clear
+order ranking  chr snp bp a1 STAGE2_beta STAGE2_stat STAGE2_p
+sort ranking
+save STAGE2_FIRB_assoc.linear.top.dta, replace
+use STAGE1_FIRB_assoc.linear.top.dta, clear
+order ranking  chr snp bp a1 STAGE1_beta STAGE1_stat STAGE1_p
+sort ranking
+save STAGE1_FIRB_assoc.linear.top.dta, replace
+merge ranking using STAGE2_FIRB_assoc.linear.top.dta
+drop _merge
+save top10_FIRB.linear.dta, replace
+outsheet using top10_FIRB.linear.txt, replace non noq
+
+
+*..........produce table of top 10 hits with beta stat and p values for SCD results
+foreach stage in 1 2 {
+	insheet using STAGE`stage'_SCD_assoc.linear.tabbed,clear 
+	keep if test =="ADD"
+	keep chr snp bp a1 beta stat p
+	gen ranking=""
+	replace ranking = "S1_SCD_01" if snp =="rs7790324"
+	replace ranking = "S1_SCD_02" if snp =="rs6817368"
+	replace ranking = "S1_SCD_03" if snp =="rs6948732"
+	replace ranking = "S1_SCD_04" if snp =="rs3213460"
+	replace ranking = "S1_SCD_05" if snp =="rs4024193"
+	replace ranking = "S1_SCD_06" if snp =="rs16860553"
+	replace ranking = "S1_SCD_07" if snp =="rs6922714"
+	replace ranking = "S1_SCD_08" if snp =="rs10036311"
+	replace ranking = "S1_SCD_09" if snp =="rs7354385"
+	replace ranking = "S1_SCD_10" if snp =="rs1107785"
+	drop if ranking ==""
+	rename beta STAGE`stage'_beta
+	rename stat STAGE`stage'_stat
+	rename p STAGE`stage'_p
+	save STAGE`stage'_SCD_assoc.linear.top.dta, replace
+	}
+
+use STAGE2_SCD_assoc.linear.top.dta, clear
+order ranking  chr snp bp a1 STAGE2_beta STAGE2_stat STAGE2_p
+sort ranking
+save STAGE2_SCD_assoc.linear.top.dta, replace
+use STAGE1_SCD_assoc.linear.top.dta, clear
+order ranking  chr snp bp a1 STAGE1_beta STAGE1_stat STAGE1_p
+sort ranking
+save STAGE1_SCD_assoc.linear.top.dta, replace
+merge ranking using STAGE2_SCD_assoc.linear.top.dta
+drop _merge
+save top10_SCD.linear.dta, replace
+append using top10_FIRB.linear.dta
+sort ranking
+save top10.linear.dta, replace
+outsheet using top10.linear.csv, replace
+
+
+
+*....extract top SNPs and produce .ped file for them
+foreach set in FIRB SCD {
+	use ${TOP10}\\GWAS_`set'.clumped.summary.dta, clear
+	keep SNP
+	sort SNP
+	outsheet using top10_`set'.list, replace non noq
+	}
+foreach set in FIRB SCD {
+	shell(${PLINK} --bfile ${DATASET} --extract top10_`set'.list --recode --out STAGE1_`set' )
+	}
+
+
+*..........FIRB top3 snps (REFER TOP10_LISTS.XLS FOR MAPPING)
+insheet using STAGE1_FIRB.ped,clear delim(" ")
+shell(perl ${TABBED} STAGE1_FIRB.ped)
+insheet using STAGE1_FIRB.ped.tabbed,clear 
+keep v1 v2 v17 v18 v9 v10 v13 v14
+rename v1 FID
+rename v2 IID
+egen rs6965827 = concat (v17 v18)
+egen rs9290477 = concat (v9 v10)
+egen rs2076184 = concat (v13 v14)
+keep FID IID rs6965827 rs9290477 rs2076184
+save STAGE1_FIRB.ped.dta, replace
+outsheet using STAGE1_FIRB.ped.csv, replace
+foreach x in rs6965827 rs9290477 rs2076184 {
+	use STAGE1_FIRB.ped.dta, clear
+	drop if `x' =="00"
+	tostring FID IID, replace
+	keep  FID IID `x'
+	sort FID IID
+	save allele_`x'.dta, replace
+	outsheet using allele_`x'.csv, replace
+	}
+
+
+*......SCD top3 snps (REFER TOP10_LISTS.XLS FOR MAPPING)
+insheet using STAGE1_SCD.ped,clear delim(" ")
+shell(perl ${TABBED} STAGE1_SCD.ped)
+insheet using STAGE1_SCD.ped.tabbed,clear 
+keep v1 v2 v15 v16 v9 v10 v17 v18
+rename v1 FID
+rename v2 IID
+egen rs7790324 = concat (v15 v16)
+egen rs6817368 = concat (v9 v10)
+egen rs6948732 = concat (v17 v18)
+keep FID IID rs7790324 rs6817368 rs6948732
+save STAGE1_SCD.ped.dta, replace
+outsheet using STAGE1_SCD.ped.csv, replace
+foreach x in rs7790324 rs6817368 rs6948732 {
+	use STAGE1_SCD.ped.dta, clear
+	drop if `x' =="00"
+	tostring FID IID, replace
+	keep  FID IID `x'
+	sort FID IID
+	save allele_`x'.dta, replace
+	outsheet using allele_`x'.csv, replace
+	}
+
+
+		
+
+ 
+SCRIPT 8: GCTA
+
+global ROOT			D:\broganc\8_gcta
+global GCTA  		D:\software\gcta\gcta_1.02\gcta.exe
+global TABBED     	D:\software\perl\tabbed.pl
+global STAGE1		D:\broganc\3_post_qc\STAGE1_final
+global COVAR		D:\broganc\5_assoc\COVAR_gender.txt
+global PHENO		D:\broganc\2_pheno\phenotype_final_recode.dta
+
+
+*.............set working directory
+cd ${ROOT}
+
+
+*...create pheno file in GCTA format
+use ${PHENO}, clear
+keep  FID IID FIRB_TOTAL
+sort FID IID
+keep FID IID FIRB_TOTAL 
+drop if FIRB_TOTAL ==.
+save PHENO_FIRB_recoded.dta, replace
+use ${PHENO}, clear
+keep  FID IID SCD_TOTAL
+sort FID IID
+keep FID IID SCD_TOTAL 
+drop if SCD_TOTAL ==.
+save PHENO_SCD_recoded.dta, replace
+outsheet using PHENO_SCD_recoded.txt, replace non noq
+merge using PHENO_FIRB_recoded.dta
+drop scd_total _merge
+outsheet using PHENO_FIRB_recoded.txt, replace non noq
+
+*.......testing GCTA
+shell(${GCTA} --bfile ${STAGE2} --chr 1 --freq --out  STAGE2A_allele.freq > freq.log )
+	
+foreach stage in STAGE1 STAGE2 {
+	shell(${GCTA} --bfile ${`stage'} --chr 1 --freq --out  `stage'_allele.freq )
+	}
+
+
+*........produce genetic relationship matrix
+foreach chr of num 1/22 {
+	shell (${GCTA} --bfile ${STAGE1}  --chr `chr' --make-grm-gz --out s1_chr`chr' > grm`chr'.log)
+	}
+shell (${GCTA} --mgrm multi_grm.txt  --make-grm --out s1_all )
+
+
+
+*.......REML analysis
+shell (${GCTA}  --reml --grm s1_all --pheno PHENO_SCD.txt  --out s1_PHENO_SCD_reml > reml_PHENO_SCD_recoded.log )
+shell (${GCTA}  --reml --grm s1_all --pheno PHENO_FIRB.txt  --out s1_PHENO_FIRB_reml > reml_PHENO_FIRB.log )
+
+shell (${GCTA}  --reml --grm s1_all --pheno PHENO_SCD_recoded.txt  --out s1_PHENO_SCD_recoded_reml > reml_PHENO_SCD_recoded.log )
+shell (${GCTA}  --reml --grm s1_all --pheno PHENO_FIRB_recoded.txt  --out s1_PHENO_FIRB_recode_reml > reml_PHENO_FIRB_recoded.log )
+
+ 
+SCRIPT 9: Box Plots of means and SD for genotypes
+
+global ROOT 	D:\broganc\9_box_plot
+global PHENO	D:\broganc\5_assoc
+global TOP		D:\broganc\7_top_hits
+cd ${ROOT}
+
+insheet using {PHENO}\FIRB_TOTAL.txt, clear
+sort fid iid
+save tmp.dta,replace
+
+insheet using {PHENO}\SCD_TOTAL.txt, clear
+sort fid iid
+merge fid iid using tmp.dta
+ta _merge
+drop _merge
+sort fid iid
+save tmp.dta,replace
+
+use {TOP}\STAGE1_FIRB.ped.dta, clear
+renvars, lower
+sort fid iid
+merge fid iid using tmp.dta
+ta _merge
+drop _merge
+sort fid iid
+save tmp.dta,replace
+
+use {TOP}\STAGE1_SCD.ped.dta, clear
+renvars, lower
+sort fid iid
+merge fid iid using tmp.dta
+ta _merge
+drop _merge
+sort fid iid
+save tmp.dta,replace
+
+order fid iid scd_total firb_total
+
+
+foreach j in  rs6965827 rs9290477 rs2076184 {
+	replace `j' = "" if `j' == "00"
+	foreach i in firb {
+		table `j' , c(mean `i'  sem `i' n `i')
+		sum `i'
+		graph box `i', over(`j') yscale(r(0(1)`r(max)')) title("`j'")
+		graph export `i'.by.`j'.png, replace height(1000) width(1000) as(png)
+		}
+	}
+
+
+foreach j in rs7790324 rs6817368 rs6948732 {
+	replace `j' = "" if `j' == "00"
+	foreach i in scd {
+		table `j' , c(mean `i'  sem `i' n `i')
+		sum `i'
+		graph box `i', over(`j') yscale(r(0(1)`r(max)')) title("`j'")
+		graph export `i'.by.`j'.png, replace height(1000) width(1000) as(png)
+		}
+	}
+
